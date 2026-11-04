@@ -1,31 +1,39 @@
-CXX = g++
-CXXFLAGS = -std=c++20 -Wall -O2 -Iinclude -Iinclude/imgui
-LDFLAGS = -lportaudio -lglfw -lGL -ldl -lpthread -lX11 -lXxf86vm -lXrandr -lXi -lm
-
-# Detect platform
-ifeq ($(OS),Windows_NT)
-    LDFLAGS += -lopengl32 -lgdi32
-    RM = del
+ifeq ($(MPI),1)
+    CXX = mpic++
+    CXXFLAGS_EXTRA = -DUSE_MPI
 else
-    RM = rm -f
+    CXX = ccache g++
+    CXXFLAGS_EXTRA =
 endif
 
-IMGUI_SRC = $(wildcard src/imgui/*.cpp)
+LDFLAGS = -lportaudio -lGL -ldl -lpthread -lX11 /usr/local/lib/libglfw3.a
 
-SRCS = $(wildcard *.cpp)
-TARGET = pedal
+TARGET  = program
+CXXFLAGS = -MMD -MP -std=c++20 -Wall -O2 -Iinclude -Iinclude/imgui $(CXXFLAGS_EXTRA)
 
-# Object files
-OBJS = $(SRCS:.cpp=.o) $(IMGUI_SRC:.cpp=.o)
+SRCS = $(wildcard *.cpp src/*.cpp src/*.c src/portaudio/*.c src/imgui/*.cpp)
+
+# Map each source to its object under build/, preserving directory structure.
+OBJS = $(patsubst %.cpp,build/%.o,$(patsubst %.c,build/%.o,$(SRCS)))
+DEPS = $(OBJS:.o=.d)
 
 all: $(TARGET)
 
 $(TARGET): $(OBJS)
-	$(CXX) -g $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
+	$(CXX) $(OBJS) -o $@ $(LDFLAGS)
 
-# Pattern rule for compiling .cpp to .o
-%.o: %.cpp
+# Pattern rules: build/foo/bar.o <- foo/bar.cpp (or .c)
+build/%.o: %.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+build/%.o: %.c
+	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 clean:
-	$(RM) $(TARGET) $(OBJS)
+	$(RM) -r build $(TARGET)
+
+-include $(DEPS)
+
+.PHONY: all clean
