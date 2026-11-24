@@ -3,10 +3,21 @@
 #include <cstring>
 #include <cmath>
 #include <algorithm> 
+#include <thread> 
+#include <iostream> 
+
+#include <glad/glad.h>
+#include <GLFW/glfw3.h>
+#include "window_manager.h"
+#include "shader.h"
+
+#include "imgui.h"
+#include "imgui_impl_glfw.h"
+#include "imgui_impl_opengl3.h"
 
 #include "portaudio/pa_ringbuffer.h"
 #include <portaudio.h> // PortAudio: Used for audio capture
-//#include <fftw3.h>     // FFTW:      Provides a discrete FFT algorithm to get
+#include <fftw3.h>     // FFTW:      Provides a discrete FFT algorithm to get
                        //            frequency data from captured audio
 
 #define SAMPLE_RATE 44100.0   // How many audio samples to capture every second (44100 Hz is standard)
@@ -20,13 +31,13 @@
 // ring buffer for our audio samples, 
 // so we allocate a consitent amount of memory 
 // for the sound overtime. this is shared between threads 
-
-PaUtilRingBuffer ringBuffer; 
-
 // buffer size must be power of two 
 const long ringBufferSize = 4096; 
-float *ringBufferData = (float*)malloc(ringBufferSize * sizeof(float));
-PaUtil_InitializeRingBuffer(&ringBuffer, sizeof(float), ringBufferSize, ringBufferData);
+
+// for windowing 
+
+int width = 800, height = 600;
+
 
 // Define our callback data (data that is passed to every callback function call)
 typedef struct {
@@ -35,11 +46,52 @@ typedef struct {
     //fftw_plan p;     // Created by FFTW to facilitate FFT calculation
     int startIndex;  // First index of our FFT output to display in the spectrogram
     int spectroSize; // Number of elements in our FFT output to display from the start index
+                     //
+    PaUtilRingBuffer ringBuffer; 
+    float*           ringData;
 } streamCallbackData;
+
+struct visualizer {
+  GLuint fbo = 0, vizTexture = 0;
+  static constexpr int VIZ_WIDTH = 1024;
+  static constexpr int VIZ_HEIGHT = 256;
+}
+
+struct audioTex {
+  GLuint tex; 
+  static constexpr int AUDIO_SAMPLES = 1024;
+}
+
+static Visualizer gViz;
+static audioTex   gAudio;
+
+void initViz(Visualizer& v) {
+  glGenFramebuffers(1, &v.fbo);
+  glBindFramebuffer(GL_FRAMEBUFFER, v.fbo);
+
+  glGenTextures(1, &v.vizTexture);
+  glBindTexture(GL_TEXTURE_2D, v.vizTexture);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, v.VIZ_WIDTH, v.VIZ_HEIGHT, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_FILTER, GL_LINEAR);
+
+  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, v.vizTexture, 0);
+  glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+void initAudioTex() {
+  glGenTextures(1, &v.audioTex);
+  glBindTexture(GL_TEXTURE_1D, v.audioTex);
+      glTexImage1D(GL_TEXTURE_1D, 0, GL_R32F,
+                 AudioTex::AUDIO_SAMPLES, 0, GL_RED, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+}
 
 // Callback data, persisted between calls. Allows us to access the data it
 // contains from within the callback function.
-static streamCallbackData* spectroData;
+static streamCallbackData* userData;
 
 // Checks the return value of a PortAudio function. Logs the message and exits
 // if there was an error
@@ -61,7 +113,7 @@ static inline float min(float a, float b) {
 static int streamCallback(
     const void* inputBuffer, void* outputBuffer, unsigned long framesPerBuffer,
     const PaStreamCallbackTimeInfo* timeInfo, PaStreamCallbackFlags statusFlags,
-    void* userData
+    void* userData 
 ) {
 
     float* out = (float*)outputBuffer;
@@ -89,85 +141,32 @@ static int streamCallback(
         out[i * NUM_CHANNELS]     = y;
         out[i * NUM_CHANNELS + 1] = y;
     }
+    streamCallbackData* data = (streamCallbackData*)userData; 
+    PaUtil_WriteRingBuffer(&data->ringBuffer, out, framesPerBuffer * NUM_CHANNELS);
 
-    PaUtil_WriteRingBuffer(&ringBuffer, out, framesPerBuffer * NUM_CHANNELS);
-    /*
-    // Cast our user data to streamCallbackData* so we can access its struct members
-    streamCallbackData* callbackData = (streamCallbackData*)userData;
-
-    // Set our spectrogram size in the terminal to 100 characters, and move the
-    // cursor to the beginning of the line
-    int dispSize = 100;
-    printf("\r");
-    
-    
-    // Copy audio sample to FFTW's input buffer
-    for (unsigned long i = 0; i < framesPerBuffer; i++) {
-        callbackData->in[i] = in[i * NUM_CHANNELS];
-    }
-      
-    // Perform FFT on callbackData->in (results will be stored in callbackData->out)
-    fftw_execute(callbackData->p);
-
-    // Draw the spectrogram
-    for (int i = 0; i < dispSize; i++) {
-        // Sample frequency data logarithmically
-        double proportion = std::pow(i / (double)dispSize, 4);
-        double freq = callbackData->out[(int)(callbackData->startIndex
-            + proportion * callbackData->spectroSize)];
-
-        // Display full block characters with heights based on frequency intensity
-        if (freq < 0.125) {
-            printf("▁");
-        } else if (freq < 0.25) {
-            printf("▂");
-        } else if (freq < 0.375) {
-            printf("▃");
-        } else if (freq < 0.5) {
-            printf("▄");
-        } else if (freq < 0.625) {
-            printf("▅");
-        } else if (freq < 0.75) {
-            printf("▆");
-        } else if (freq < 0.875) {
-            printf("▇");
-        } else {
-            printf("█");
-        }
-    }
-
-    // Display the buffered changes to stdout in the terminal
-    fflush(stdout);
-    */
     return 0;
 }
+void display(int id) {
+
+}
+
+
 
 int main() {
     // Initialize PortAudio
     PaError err;
     err = Pa_Initialize();
     checkErr(err);
+    
+    // allocate our user data 
 
-    // Allocate and define the callback data used to calculate/display the spectrogram
-    /*
-    spectroData = (streamCallbackData*)malloc(sizeof(streamCallbackData));
-    spectroData->in = (double*)malloc(sizeof(double) * FRAMES_PER_BUFFER);
-    spectroData->out = (double*)malloc(sizeof(double) * FRAMES_PER_BUFFER);
-    if (spectroData->in == NULL || spectroData->out == NULL) {
-        printf("Could not allocate spectro data\n");
-        exit(EXIT_FAILURE);
-    }
-    spectroData->p = fftw_plan_r2r_1d(
-        FRAMES_PER_BUFFER, spectroData->in, spectroData->out,
-        FFTW_R2HC, FFTW_ESTIMATE
-    );
-    double sampleRatio = FRAMES_PER_BUFFER / SAMPLE_RATE;
-    spectroData->startIndex = std::ceil(sampleRatio * SPECTRO_FREQ_START);
-    spectroData->spectroSize = min(
-        std::ceil(sampleRatio * SPECTRO_FREQ_END),
-        FRAMES_PER_BUFFER / 2.0
-    ) - spectroData->startIndex;
-    */
+    userData = (streamCallbackData*)calloc(1, sizeof(streamCallbackData));
+    if (!userData) {exit(EXIT_FAILURE); } 
+
+
+    userData->ringData = (float*)malloc(ringBufferSize * sizeof(float));
+    PaUtil_InitializeRingBuffer(&userData->ringBuffer, sizeof(float), ringBufferSize, userData->ringData);
+   
     // Get and display the number of audio devices accessible to PortAudio
     int numDevices = Pa_GetDeviceCount();
     printf("Number of devices: %d\n", numDevices);
@@ -182,6 +181,8 @@ int main() {
 
     // Display audio device information for each device accessible to PortAudio
     const PaDeviceInfo* deviceInfo;
+    bool debug = false;
+    if (debug){
     for (int i = 0; i < numDevices; i++) {
         deviceInfo = Pa_GetDeviceInfo(i);
         printf("Device %d:\n", i);
@@ -190,7 +191,7 @@ int main() {
         printf("  maxOutputChannels: %d\n", deviceInfo->maxOutputChannels);
         printf("  defaultSampleRate: %f\n", deviceInfo->defaultSampleRate);
     }
-
+    }
     // Use device 0 (for a programmatic solution for choosing a device,
     // `numDevices - 1` is typically the 'default' device
     int device = Pa_GetDefaultInputDevice();
@@ -225,38 +226,58 @@ int main() {
         FRAMES_PER_BUFFER,
         paNoFlag,
         streamCallback,
-        spectroData
+        userData
     );
     checkErr(err);
-
+    
+      
     // Begin capturing audio
     err = Pa_StartStream(stream);
     checkErr(err);
 
-    // Wait 30 seconds (PortAudio will continue to capture audio)
-    bool running = true;
-    while (running);
+
+    // windowing 
+    try {
+
+        WindowManager wm(width,height, "pedals", /*fullscreen*/ false);
+        //GLFWwindow* window = wm.getWindow();
+
+        while (!wm.shouldClose())
+        {
+          wm.pollEvents();
+          glClear(GL_COLOR_BUFFER_BIT);
+
+          
+
+
+          wm.beginImGuiFrame();
+          bool show_demo_window = true; 
+          ImGui::ShowDemoWindow(&show_demo_window);
+          
+          // imgui 
+          ImGui::Begin("Guitar");
+          ImGui::Text("Drive");
+          ImGui::End();
+
+          wm.renderImGui();
+          wm.swapBuffers();
+        }
+      } catch (const std::exception& e) {
+        std::cerr << "Error" << e.what() << std::endl;
+      }
+    
 
     // Stop capturing audio
     err = Pa_StopStream(stream);
-    checkErr(err);
-
-    // Close the PortAudio stream
     err = Pa_CloseStream(stream);
-    checkErr(err);
-
-    // Terminate PortAudio
     err = Pa_Terminate();
     checkErr(err);
-
-    // Free allocated resources used for FFT calculation
-    /*
-    fftw_destroy_plan(spectroData->p);
-    fftw_free(spectroData->in);
-    fftw_free(spectroData->out);
-    free(spectroData);
-    */
+    
+    // free memory 
+    free(userData->ringData);
+    free(userData);
+    
     printf("\n");
-
+  
     return EXIT_SUCCESS;
 }

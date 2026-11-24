@@ -8,7 +8,7 @@ endif
 
 LDFLAGS = -lportaudio -lGL -ldl -lpthread -lX11 /usr/local/lib/libglfw3.a
 
-TARGET  = program
+TARGET  = pedalboard
 CXXFLAGS = -MMD -MP -std=c++20 -Wall -O2 -Iinclude -Iinclude/imgui $(CXXFLAGS_EXTRA)
 
 SRCS = $(wildcard *.cpp src/*.cpp src/*.c src/portaudio/*.c src/imgui/*.cpp)
